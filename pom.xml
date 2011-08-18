@@ -2,9 +2,9 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>biz.neustar</groupId>
     <artifactId>loggly</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    <version>1.0-beta-1</version>
     <name>Loggly for Java</name>
-    <description></description>
+    <description />
     <url>http://proxy.browsermob.com</url>
     <packaging>jar</packaging>
 
