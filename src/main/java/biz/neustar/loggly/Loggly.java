@@ -14,6 +14,7 @@ public class Loggly {
             return new Loggly();
         }
     };
+
     private Map<String, Object> local = new HashMap<String, Object>(GLOBAL);
 
     public synchronized static void addGlobal(String key, Object o) {
@@ -26,6 +27,7 @@ public class Loggly {
 
     public static void clear() {
         THREAD_LOCAL.get().local.clear();
+        THREAD_LOCAL.get().local.putAll(GLOBAL);
     }
 
     static Map<String, Object> getMap() {
