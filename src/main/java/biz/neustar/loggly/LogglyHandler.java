@@ -1,5 +1,6 @@
 package biz.neustar.loggly;
 
+import org.apache.http.HttpEntity;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.conn.params.ConnManagerParams;
@@ -14,13 +15,12 @@ import org.apache.http.params.BasicHttpParams;
 import org.apache.http.params.HttpParams;
 import org.codehaus.jackson.map.ObjectMapper;
 
+import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.util.Map;
-import java.util.concurrent.LinkedBlockingDeque;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import java.util.Queue;
+import java.util.concurrent.*;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
@@ -33,9 +33,9 @@ public class LogglyHandler extends Handler {
 
     private DefaultHttpClient httpClient;
     private ThreadPoolExecutor pool;
+    private Queue<LogglySample> retryQueue;
+    private boolean allowRetry = true;
     private String inputUrl;
-    private int maxThreads;
-    private int backlog;
 
     /**
      * Creates a handler with the specified input URL, 10 threads, and support for 5000 messages in the backlog.
@@ -56,8 +56,6 @@ public class LogglyHandler extends Handler {
      */
     public LogglyHandler(String inputUrl, int maxThreads, int backlog) {
         this.inputUrl = inputUrl;
-        this.maxThreads = maxThreads;
-        this.backlog = backlog;
 
         pool = new ThreadPoolExecutor(maxThreads, maxThreads,
                 60L, TimeUnit.SECONDS,
@@ -71,6 +69,36 @@ public class LogglyHandler extends Handler {
                     }
                 }, new ThreadPoolExecutor.DiscardOldestPolicy());
         pool.allowCoreThreadTimeOut(true);
+
+        retryQueue = new LinkedBlockingQueue<LogglySample>(backlog);
+
+        Thread retryThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                while (allowRetry) {
+                    // drain the retry requests
+                    LogglySample sample = null;
+                    while ((sample = retryQueue.poll()) != null) {
+                        if (sample.retryCount > 10) {
+                            // todo: capture statistics about the failure (exception and/or status code)
+                            //       and then report on it in some sort of thoughtful way to standard err
+                        } else {
+                            pool.submit(sample);
+                        }
+                    }
+
+                    // retry every 10 seconds
+                    try {
+                        Thread.sleep(10000);
+                    } catch (InterruptedException e) {
+                        System.err.println("Retry sleep was interrupted, giving up on retry thread");
+                        return;
+                    }
+                }
+            }
+        }, "Loggly Retry Thraed");
+        retryThread.setDaemon(true);
+        retryThread.start();
 
         HttpParams params = new BasicHttpParams();
         ConnManagerParams.setMaxTotalConnections(params, maxThreads);
@@ -144,29 +172,7 @@ public class LogglyHandler extends Handler {
             map.put("stackTrace", sw.toString());
         }
 
-        pool.submit(new Runnable() {
-            // todo: put in better retry logic!
-
-            @Override
-            public void run() {
-                try {
-                    HttpPost post = new HttpPost(inputUrl);
-                    StringWriter writer = new StringWriter();
-                    OM.writeValue(writer, map);
-                    post.setEntity(new StringEntity(writer.toString()));
-                    post.setHeader("Content-Type", "application/x-www-form-urlencoded");
-                    HttpResponse response = httpClient.execute(post);
-                    int statusCode = response.getStatusLine().getStatusCode();
-                    if (statusCode != 200) {
-                        System.err.printf("Got back %d code from Loggly\n", statusCode);
-                    }
-                    response.getEntity().getContent().close();
-                } catch (Exception e) {
-                    System.err.printf("Could not send to %s\n", inputUrl);
-                    e.printStackTrace();
-                }
-            }
-        });
+        pool.submit(new LogglySample(map));
     }
 
     @Override
@@ -180,6 +186,13 @@ public class LogglyHandler extends Handler {
         }
 
         try {
+            // first, anything in the retry queue should be tried one last time and then we give up on it
+            allowRetry = false;
+            for (LogglySample sample : retryQueue) {
+                pool.submit(sample);
+            }
+            retryQueue.clear();
+
             System.out.println("Shutting down Loggly handler - waiting 90 seconds for " + pool.getQueue().size() + " logs to finish");
             pool.shutdown();
             try {
@@ -194,6 +207,53 @@ public class LogglyHandler extends Handler {
         } finally {
             httpClient.getConnectionManager().shutdown();
             System.out.println("Loggly handler shut down");
+        }
+    }
+
+    private class LogglySample implements Runnable {
+        private final Map<String, Object> map;
+        private int retryCount = 0;
+        private Exception exception;
+        private int statusCode;
+
+        public LogglySample(Map<String, Object> map) {
+            this(map, 0);
+        }
+
+        private LogglySample(Map<String, Object> map, int retryCount) {
+            this.map = map;
+            this.retryCount = retryCount;
+        }
+
+        @Override
+        public void run() {
+            HttpEntity entity = null;
+            try {
+                HttpPost post = new HttpPost(inputUrl);
+                StringWriter writer = new StringWriter();
+                OM.writeValue(writer, map);
+                post.setEntity(new StringEntity(writer.toString()));
+                post.setHeader("Content-Type", "application/x-www-form-urlencoded");
+                HttpResponse response = httpClient.execute(post);
+                entity = response.getEntity();
+                statusCode = response.getStatusLine().getStatusCode();
+                if (statusCode != 200) {
+                    retryCount++;
+                    retryQueue.offer(this);
+                }
+            } catch (Exception e) {
+                exception = e;
+                retryCount++;
+                retryQueue.offer(this);
+            } finally {
+                if (entity != null) {
+                    try {
+                        entity.consumeContent();
+                    } catch (IOException e) {
+                        // safe to ignore
+                    }
+                }
+            }
         }
     }
 }
