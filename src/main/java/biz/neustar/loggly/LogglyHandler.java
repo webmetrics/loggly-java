@@ -238,13 +238,17 @@ public class LogglyHandler extends Handler {
                 entity = response.getEntity();
                 statusCode = response.getStatusLine().getStatusCode();
                 if (statusCode != 200) {
+                    if (allowRetry) {
+                        retryCount++;
+                        retryQueue.offer(this);
+                    }
+                }
+            } catch (Exception e) {
+                if (allowRetry) {
+                    exception = e;
                     retryCount++;
                     retryQueue.offer(this);
                 }
-            } catch (Exception e) {
-                exception = e;
-                retryCount++;
-                retryQueue.offer(this);
             } finally {
                 if (entity != null) {
                     try {
