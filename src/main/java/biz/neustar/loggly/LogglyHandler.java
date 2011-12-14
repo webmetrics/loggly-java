@@ -12,6 +12,7 @@ import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.DefaultHttpClient;
 import org.apache.http.impl.conn.tsccm.ThreadSafeClientConnManager;
 import org.apache.http.params.BasicHttpParams;
+import org.apache.http.params.CoreConnectionPNames;
 import org.apache.http.params.HttpParams;
 import org.codehaus.jackson.map.ObjectMapper;
 
@@ -96,7 +97,7 @@ public class LogglyHandler extends Handler {
                     }
                 }
             }
-        }, "Loggly Retry Thraed");
+        }, "Loggly Retry Thread");
         retryThread.setDaemon(true);
         retryThread.start();
 
@@ -104,6 +105,10 @@ public class LogglyHandler extends Handler {
         ConnManagerParams.setMaxTotalConnections(params, maxThreads);
         ConnPerRouteBean connPerRoute = new ConnPerRouteBean(maxThreads);
         ConnManagerParams.setMaxConnectionsPerRoute(params, connPerRoute);
+
+        // set 15 second timeouts, since Loggly should return quickly
+        params.setIntParameter(CoreConnectionPNames.SO_TIMEOUT, 15000);
+        params.setIntParameter(CoreConnectionPNames.CONNECTION_TIMEOUT, 15000);
 
         SchemeRegistry registry = new SchemeRegistry();
         try {
